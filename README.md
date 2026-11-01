@@ -1,6 +1,6 @@
 # Sports Score Ticker for Windows
 
-**NHL · NFL · MLB · NBA · Bundesliga · F1** · Version 2.8.0 (see `CHANGELOG.md` for what changed in each version)
+**NHL · NFL · MLB · NBA · Bundesliga · F1** · Version 2.9.0 (see `CHANGELOG.md` for what changed in each version)
 
 An always-on-top bar that scrolls every game for the day in the league you
 pick. It moves continuously from left to right and wraps around in a seamless
@@ -52,7 +52,7 @@ creates `dist\SportsTicker.exe`, which runs on any Windows PC without Python.
 `SportsTicker.exe`) in that folder.
 
 **Building the installer yourself:** install NSIS 3, then run
-`makensis -DVERSION=2.8.0 installer\SportsTicker.nsi`. The script is in the
+`makensis -DVERSION=2.9.0 installer\SportsTicker.nsi`. The script is in the
 `installer` folder.
 
 **Coming from the NHL-only ticker?** Close it with its X first, then delete its
@@ -68,7 +68,7 @@ folder (and its startup shortcut, if you made one). This version includes the NH
 | Mouse wheel | Scrolls through games by hand |
 | Right-click | Settings: league, refresh, previous/next day, scroll on/off, speed, direction, position, always-on-top, exit |
 | Drag the league logo | Moves the bar between the top and bottom of the screen |
-| Right-click → F1 live timing sign-in… | Connects F1 races to F1's official live timing for exact gaps (optional) |
+| Right-click → F1 live timing sign-in… | Optional backup sign-in for F1 live timing (not needed for gaps) |
 | Right-click → Uninstall Sports Ticker… | Removes the app, its shortcuts and (if you choose) its settings |
 | Right-click → What's new… | Shows the changelog; the version number is at the bottom of the menu |
 | ↻ at the right end | Refresh now |
@@ -113,21 +113,20 @@ F1 works a little differently, because it's races rather than games:
 While a Grand Prix or sprint is running, the F1 ticker switches to a live view:
 **LIVE**, the race, the lap, and any safety car, VSC or flag. Then every driver
 in their current position with the **split to the car ahead** (PIT and OUT are
-marked). Click it for the **Live race** tab, which shows the interval, gap to
-the leader, laps and pit stops for every car, updating every 2 seconds. The
+marked). The gaps refresh every 10 seconds. Click it for the **Live race** tab,
+which shows the interval, gap to the leader, laps and pit stops for every car. The
 live view starts 10 minutes before lights out and switches back to the final
 results once they're published.
 
-There are two sources for the live data:
+The live data comes from **F1's official live timing**, the same feed the
+official F1 app uses. Its free part (positions, gaps, team colors, laps, track
+status) needs no account and no setup. While it's connecting, or if it's
+unavailable, the ticker shows ESPN's live running order instead. ESPN has no
+gaps, and each driver's team color comes from the latest race results.
 
-- **Free, no setup:** the live running order from ESPN. When ESPN's feed
-  includes gaps, the splits between cars are worked out from them.
-- **Exact gaps with your F1 account:** right-click → **F1 live timing
-  sign-in…** connects to F1's official live timing, the same data the official
-  F1 app uses. The window walks you through copying your sign-in from
-  formula1.com. It lasts a few days at a time; when it runs out, the ticker
-  tells you and falls back to ESPN until you sign in again. The sign-in is
-  stored only on your PC.
+Signing in is optional: right-click → **F1 live timing sign-in…** is there as
+a backup in case F1 starts requiring an account. If a saved sign-in is ever
+rejected, the ticker carries on without it.
 
 ## The game stats window
 

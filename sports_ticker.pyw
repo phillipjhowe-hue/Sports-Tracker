@@ -1,7 +1,7 @@
 """
 Sports Score Ticker for Windows  (NHL · NFL · MLB · NBA · Bundesliga · F1)
 --------------------------------------------------------------------------
-Version 2.8.0 (see CHANGELOG.md for the history of changes)
+Version 2.9.0 (see CHANGELOG.md for the history of changes)
 
 An always-on-top bar that scrolls every game for the day in the league you
 pick. Click any game for its full stats: line score, team stats, scoring
@@ -54,7 +54,7 @@ from tkinter import messagebox, ttk
 NHL_API = "https://api-web.nhle.com/v1"
 ESPN_API = "https://site.api.espn.com/apis/site/v2/sports"
 JOLPICA = "https://api.jolpi.ca/ergast/f1"
-APP_VERSION = "2.8.0"
+APP_VERSION = "2.9.0"
 USER_AGENT = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) SportsTicker/{APP_VERSION}"
 
 # ---------------------------------------------------------------- theme ----
@@ -430,9 +430,14 @@ class F1LiveTiming:
                 self._session()
                 delay = 5
             except F1AuthError as e:
-                self.auth_failed = True
-                self.status = f"F1 sign-in was rejected ({e}). Update your F1 token."
-                self._stop.wait(300)
+                if self.token:
+                    # Sign-in rejected or expired: carry on with the free feed.
+                    self.auth_failed = True
+                    self.token = ""
+                    self.status = f"F1 sign-in was rejected ({e}); using free live timing."
+                    continue
+                self.status = f"F1 live timing refused the connection ({e})."
+                self._stop.wait(120)
                 continue
             except Exception as e:  # noqa: BLE001
                 if self._stop.is_set():
@@ -450,9 +455,10 @@ class F1LiveTiming:
     def _negotiate(self):
         scheme = "https" if self.secure else "http"
         url = f"{scheme}://{self.host}:{self.port}/signalrcore/negotiate?negotiateVersion=1"
-        req = urllib.request.Request(url, data=b"", method="POST", headers={
-            "Authorization": f"Bearer {self.token}", "User-Agent": BROWSER_UA,
-            "Content-Type": "text/plain;charset=UTF-8"})
+        hdrs = {"User-Agent": BROWSER_UA, "Content-Type": "text/plain;charset=UTF-8"}
+        if self.token:
+            hdrs["Authorization"] = f"Bearer {self.token}"
+        req = urllib.request.Request(url, data=b"", method="POST", headers=hdrs)
         try:
             resp = urllib.request.urlopen(req, timeout=15)
         except urllib.error.HTTPError as e:
@@ -473,8 +479,9 @@ class F1LiveTiming:
         path = "/signalrcore?id=" + urllib.parse.quote(conn, safe="")
         head = [f"GET {path} HTTP/1.1", f"Host: {self.host}", "Upgrade: websocket",
                 "Connection: Upgrade", f"Sec-WebSocket-Key: {key}", "Sec-WebSocket-Version: 13",
-                f"Authorization: Bearer {self.token}", f"User-Agent: {BROWSER_UA}",
-                "Origin: https://www.formula1.com"]
+                f"User-Agent: {BROWSER_UA}", "Origin: https://www.formula1.com"]
+        if self.token:
+            head.append(f"Authorization: Bearer {self.token}")
         if cookies:
             head.append(f"Cookie: {cookies}")
         self.sock.sendall(("\r\n".join(head) + "\r\n\r\n").encode())
@@ -1988,9 +1995,9 @@ class Ticker:
         self.f1_live_key = key
         self.f1_live = {"race": race, "which": which, "rows": [], "source": "", "lap": "",
                         "track": "", "note": "Waiting for live timing…"}
-        tok = self.cfg.get("f1_token")
-        if tok:
-            self.f1_stream = F1LiveTiming(tok).start()
+        # F1's live timing serves positions and gaps without signing in; an F1
+        # account sign-in, if saved, is used too and dropped if it's rejected.
+        self.f1_stream = F1LiveTiming(self.cfg.get("f1_token") or "").start()
         self._f1_live_tick()
 
     def _f1_live_end(self):
@@ -2018,7 +2025,7 @@ class Ticker:
             else:
                 note = self.f1_stream.status
         if data is None:
-            if time.time() - self._espn_f1_last > 10 and not self._espn_f1_busy:
+            if time.time() - self._espn_f1_last > 9 and not self._espn_f1_busy:
                 self._espn_f1_busy = True
                 self._espn_f1_last = time.time()
                 self.worker.run(lambda: fetch_json(f"{ESPN_API}/racing/f1/scoreboard"),
@@ -2027,8 +2034,15 @@ class Ticker:
             if self._espn_f1_data:
                 data = dict(self._espn_f1_data)
                 data["rows"] = [dict(r) for r in self._espn_f1_data["rows"]]
-                data["source"] = "ESPN" + (" (F1 sign-in not connected)" if self.f1_stream else "")
+                data["source"] = "ESPN (no gaps: waiting for F1 live timing)"
         if data and data.get("rows"):
+            teams = self._f1_team_map()
+            for r in data["rows"]:
+                if r.get("color") in (None, "", FG_DIM):
+                    hit = teams.get(r.get("code", "").upper()) or teams.get(
+                        norm((r.get("name") or "").split(" ")[-1])) or teams.get(str(r.get("num")))
+                    if hit:
+                        r["color"], r["team"] = hit[0], r.get("team") or hit[1]
             fill_intervals(data["rows"])
             data["note"] = ""
             self.f1_live.update(data)
@@ -2040,7 +2054,28 @@ class Ticker:
         if sig != self._f1_live_sig:
             self._f1_live_sig = sig
             self.redraw()
-        self.f1_live_job = self.root.after(2000, self._f1_live_tick)
+        # Gaps refresh every 10 s; check sooner until the first live data arrives.
+        wait = 10000 if self.f1_live["rows"] and self.f1_live.get("source", "").startswith("F1") \
+            else 2500
+        self.f1_live_job = self.root.after(wait, self._f1_live_tick)
+
+    def _f1_team_map(self):
+        """Driver -> (team colour, team name) from the latest race results, for
+        live feeds that don't say which team each driver drives for."""
+        race = (self.f1 or {}).get("race") or {}
+        key = (race.get("season"), race.get("round"))
+        if getattr(self, "_team_map_key", None) == key:
+            return self._team_map
+        m = {}
+        for r in race.get("Results") or []:
+            d = r.get("Driver") or {}
+            val = (f1_team_color(r), (r.get("Constructor") or {}).get("name", ""))
+            for k in (str(d.get("code", "")).upper(), norm(d.get("familyName", "")),
+                      str(r.get("number", ""))):
+                if k:
+                    m[k] = val
+        self._team_map_key, self._team_map = key, m
+        return m
 
     def _on_espn_f1(self, data):
         self._espn_f1_busy = False
@@ -2066,11 +2101,12 @@ class Ticker:
         tk.Label(win, text="F1 live timing sign-in", font=("Segoe UI", 15, "bold"), bg=BG,
                  fg=FG).pack(pady=(16, 6), **pad)
         tk.Label(win, justify="left", wraplength=w - 40, bg=BG, fg=FG, font=("Segoe UI", 10),
-                 text="Without signing in, the F1 ticker shows the live running order from "
-                      "ESPN during races. Signing in with your F1 account connects to F1's "
-                      "official live timing, which adds the exact gap between every driver.\n\n"
-                      "1.  In your web browser, sign in at formula1.com with your F1 account "
-                      "(F1 TV).\n"
+                 text="You don't need to sign in: during races the ticker connects to F1's "
+                      "official live timing by itself, with the gap between every driver. "
+                      "Signing in is a backup in case F1 starts requiring an account. A free "
+                      "formula1.com account works; if F1 ever rejects it, the ticker simply "
+                      "carries on without it.\n\n"
+                      "1.  In your web browser, sign in at formula1.com with your F1 account.\n"
                       "2.  Press F12 to open the developer tools, then go to Application "
                       "(Chrome or Edge) or Storage (Firefox) > Cookies > "
                       "https://www.formula1.com.\n"
@@ -2089,8 +2125,8 @@ class Ticker:
         def show():
             tok = self.cfg.get("f1_token")
             if not tok:
-                status.configure(text="Not signed in: live races use ESPN's running order.",
-                                 fg=FG_DIM)
+                status.configure(text="Not signed in (not needed): live races use F1's free "
+                                      "live timing.", fg=FG_DIM)
                 return
             exp = jwt_expiry(tok)
             if exp and exp < datetime.now(timezone.utc):
@@ -3645,7 +3681,7 @@ class F1Window:
             self.live_info.configure(text="The session has finished. Final results appear "
                                           "here shortly after the race.", fg=FG_DIM)
             return
-        self.top.after(2000, self._live_refresh)
+        self.top.after(2500, self._live_refresh)
 
     def _tab(self, title, cols, height=20):
         fr = ttk.Frame(self.nb, padding=8)

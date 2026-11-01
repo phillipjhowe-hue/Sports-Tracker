@@ -4,6 +4,25 @@ All notable changes to the Sports Ticker. Newest first.
 Version numbers: **major.minor.patch**. A major bump means a big change in
 what the app is, minor means new features, and patch means fixes and small tweaks.
 
+## 2.9.0 — 2026-11-01
+### Fixed
+- **Live F1 gaps now show without signing in.** During races the ticker now
+  connects to F1's official live timing automatically. Its free feed includes
+  every driver's gap to the car in front. Before, it only connected after
+  signing in, so with no sign-in it showed ESPN's running order, which has no
+  gaps.
+- **Live F1 team colors:** the bar in front of each driver is now always their
+  team color. When a live feed doesn't say which team a driver is with (ESPN
+  doesn't), the team is taken from the latest race results. Before, these bars
+  were grey.
+### Changed
+- Live F1 gaps refresh **every 10 seconds**, on the ticker and in the Live
+  race tab.
+- The F1 sign-in is now an optional backup. If a saved sign-in is ever
+  rejected, the ticker carries on with the free feed instead of stopping.
+- ESPN is now only the fallback, used while F1 live timing is connecting or
+  unavailable.
+
 ## 2.8.0 — 2026-11-01
 ### Added
 - **Uninstall Sports Ticker…** in the right-click menu.
