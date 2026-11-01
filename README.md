@@ -175,9 +175,9 @@ Live games update every 20 seconds while the window is open. Press `Esc` to clos
   NFL, MLB, NBA and Bundesliga scores and stats come from ESPN's public feed
   (`site.api.espn.com`), and all team and league logos come from ESPN's image
   server. F1 results, qualifying and standings come from the Jolpica F1 API
-  (`api.jolpi.ca`), the community-run successor to Ergast. Live F1 race order
-  comes from ESPN, or from F1's official live timing
-  (`livetiming.formula1.com`) when you sign in. None of these feeds
+  (`api.jolpi.ca`), the community-run successor to Ergast. Live F1 positions
+  and gaps come from F1's official live timing (`livetiming.formula1.com`), with
+  ESPN as a fallback. None of these feeds
   needs a key, but none is officially documented, so any of them could change
   without notice. If a section ever shows blank, the feed
   has probably changed shape; the rest of the app keeps working. If a logo
