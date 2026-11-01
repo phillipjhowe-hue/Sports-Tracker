@@ -1,7 +1,7 @@
 """
 Sports Score Ticker for Windows  (NHL · NFL · MLB · NBA · Bundesliga · F1)
 --------------------------------------------------------------------------
-Version 2.6.0 (see CHANGELOG.md for the history of changes)
+Version 2.7.0 (see CHANGELOG.md for the history of changes)
 
 An always-on-top bar that scrolls every game for the day in the league you
 pick. Click any game for its full stats: line score, team stats, scoring
@@ -53,7 +53,7 @@ from tkinter import ttk
 NHL_API = "https://api-web.nhle.com/v1"
 ESPN_API = "https://site.api.espn.com/apis/site/v2/sports"
 JOLPICA = "https://api.jolpi.ca/ergast/f1"
-APP_VERSION = "2.6.0"
+APP_VERSION = "2.7.0"
 USER_AGENT = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) SportsTicker/{APP_VERSION}"
 
 # ---------------------------------------------------------------- theme ----
@@ -1225,6 +1225,14 @@ class Ticker:
         root.configure(bg=BG)
         root.attributes("-topmost", bool(self.cfg["topmost"]))
         root.title(f"Sports Ticker v{APP_VERSION}")
+        if sys.platform == "win32":   # app icon for the ticker and every window it opens
+            base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+            ico = os.path.join(base, "sports_ticker.ico")
+            if os.path.exists(ico):
+                try:
+                    root.iconbitmap(default=ico)
+                except tk.TclError:
+                    pass
 
         self.f_abbr = tkfont.Font(family="Segoe UI", size=round(10 * K), weight="bold")
         self.f_score = tkfont.Font(family="Segoe UI", size=round(10 * K), weight="bold")

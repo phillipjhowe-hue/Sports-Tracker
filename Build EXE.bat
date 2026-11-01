@@ -14,7 +14,7 @@ if not defined PY (
 echo Installing PyInstaller...
 "%PY%" -m pip install --upgrade pyinstaller || goto :fail
 echo Building...
-"%PY%" -m PyInstaller --onefile --noconsole --name SportsTicker --add-data "CHANGELOG.md;." sports_ticker.pyw || goto :fail
+"%PY%" -m PyInstaller --onefile --noconsole --name SportsTicker --icon sports_ticker.ico --add-data "CHANGELOG.md;." --add-data "sports_ticker.ico;." sports_ticker.pyw || goto :fail
 echo.
 echo Done! Your app is at: %~dp0dist\SportsTicker.exe
 explorer "%~dp0dist"

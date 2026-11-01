@@ -4,6 +4,22 @@ All notable changes to the Sports Ticker. Newest first.
 Version numbers: **major.minor.patch**. A major bump means a big change in
 what the app is, minor means new features, and patch means fixes and small tweaks.
 
+## 2.7.0 — 2026-11-01
+### Added
+- **Windows installer** (`SportsTicker_Setup.exe`): a setup wizard that lets
+  you choose:
+  - a **desktop icon** (on by default);
+  - **Start menu** shortcuts, including an uninstaller (on by default);
+  - **start Sports Ticker when Windows starts** (off by default).
+- The installer checks for Python and offers to install it automatically if
+  it's missing.
+- It installs just for you (no administrator rights needed), and the last page
+  can start the ticker right away.
+- Running the installer again updates Sports Ticker and keeps your settings.
+- Uninstall from Settings > Apps or the Start menu; it asks whether to keep
+  your settings.
+- An app icon, used for the shortcuts, the installer and the ticker's windows.
+
 ## 2.6.0 — 2026-11-01
 ### Added
 - **Live F1 race standings.** While a Grand Prix or sprint is running, the F1

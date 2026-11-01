@@ -1,6 +1,6 @@
 # Sports Score Ticker for Windows
 
-**NHL · NFL · MLB · NBA · Bundesliga · F1** · Version 2.6.0 (see `CHANGELOG.md` for what changed in each version)
+**NHL · NFL · MLB · NBA · Bundesliga · F1** · Version 2.7.0 (see `CHANGELOG.md` for what changed in each version)
 
 An always-on-top bar that scrolls every game for the day in the league you
 pick. It moves continuously from left to right and wraps around in a seamless
@@ -12,9 +12,29 @@ highlight video from each team's official YouTube channel.
 The ticker reserves its strip of the screen the same way the Windows taskbar
 does, so nothing gets hidden behind it: maximized windows stop at its edge.
 
-## Running it
+## Installing
 
-Double-click **`Start Sports Ticker.bat`**.
+Run **`SportsTicker_Setup.exe`** and follow the wizard. On the
+**Choose Components** page you can pick:
+
+- **Desktop icon:** puts a Sports Ticker icon on your desktop (on by default).
+- **Start menu shortcuts:** adds Sports Ticker and its uninstaller to the
+  Start menu (on by default).
+- **Start Sports Ticker when Windows starts** (off by default).
+
+Setup installs just for you, so it doesn't need administrator rights. If Python
+isn't on your PC, it offers to install it for you. The last page can start the
+ticker right away. To update later, run the newer `SportsTicker_Setup.exe`; it
+replaces the old version and keeps your settings. To uninstall, use
+**Settings > Apps** or **Start menu > Sports Ticker > Uninstall Sports Ticker**.
+
+Windows may show a blue **"Windows protected your PC"** box the first time,
+because the installer isn't code-signed. Click **More info**, then **Run anyway**.
+
+### Running without installing
+
+You can also run it straight from the folder: double-click
+**`Start Sports Ticker.bat`**.
 
 The ticker runs on Python (free, from python.org). If it isn't on your PC yet,
 the launcher offers to install it for you: press **Y**, wait about a minute,
@@ -26,8 +46,13 @@ double-click the launcher again.
 **Want a single .exe instead?** Double-click **`Build EXE.bat`** once. It
 creates `dist\SportsTicker.exe`, which runs on any Windows PC without Python.
 
-**Start with Windows:** press `Win + R`, type `shell:startup`, and put a
-shortcut to `Start Sports Ticker.bat` (or `SportsTicker.exe`) in that folder.
+**Start with Windows** (when not using the installer): press `Win + R`, type
+`shell:startup`, and put a shortcut to `Start Sports Ticker.bat` (or
+`SportsTicker.exe`) in that folder.
+
+**Building the installer yourself:** install NSIS 3, then run
+`makensis -DVERSION=2.7.0 installer\SportsTicker.nsi`. The script is in the
+`installer` folder.
 
 **Coming from the NHL-only ticker?** Close it with its X first, then delete its
 folder (and its startup shortcut, if you made one). This version includes the NHL.
