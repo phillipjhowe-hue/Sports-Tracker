@@ -1,7 +1,7 @@
 """
 Sports Score Ticker for Windows  (NHL · NFL · MLB · NBA · Bundesliga · F1)
 --------------------------------------------------------------------------
-Version 2.5.0 (see CHANGELOG.md for the history of changes)
+Version 2.6.0 (see CHANGELOG.md for the history of changes)
 
 An always-on-top bar that scrolls every game for the day in the league you
 pick. Click any game for its full stats: line score, team stats, scoring
@@ -12,7 +12,9 @@ Data sources (public, no key needed):
   NHL ................. api-web.nhle.com (the NHL's own feed)
   NFL, MLB, NBA,
   Bundesliga .......... site.api.espn.com (the feed behind ESPN.com)
-  F1 .................. api.jolpi.ca (Jolpica, the Ergast-compatible F1 API)
+  F1 .................. api.jolpi.ca (Jolpica, the Ergast-compatible F1 API);
+                        live race order from ESPN, or F1's official live timing
+                        (livetiming.formula1.com) when signed in with an F1 account
 Requires only Python 3.9+ (standard library: tkinter, urllib, json).
 
 Controls
@@ -25,27 +27,33 @@ Controls
 """
 
 import base64
+import copy
 import hashlib
 import json
 import os
 import queue
 import re
+import socket
+import ssl
+import struct
 import sys
 import threading
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
 import xml.etree.ElementTree as ET
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from tkinter import ttk
 
 NHL_API = "https://api-web.nhle.com/v1"
 ESPN_API = "https://site.api.espn.com/apis/site/v2/sports"
 JOLPICA = "https://api.jolpi.ca/ergast/f1"
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.6.0"
 USER_AGENT = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) SportsTicker/{APP_VERSION}"
 
 # ---------------------------------------------------------------- theme ----
@@ -121,6 +129,449 @@ def f1_driver(r):
 def f1_full_name(d):
     return f"{d.get('givenName', '')} {d.get('familyName', '')}".strip()
 
+
+def f1_color_for(team_name="", constructor_id=""):
+    if constructor_id in F1_TEAM_COLORS:
+        return F1_TEAM_COLORS[constructor_id]
+    n = (team_name or "").lower()
+    for key, cid in (("racing bulls", "rb"), ("visa", "rb"), ("red bull", "red_bull"),
+                     ("ferrari", "ferrari"), ("mercedes", "mercedes"), ("mclaren", "mclaren"),
+                     ("aston", "aston_martin"), ("alpine", "alpine"), ("williams", "williams"),
+                     ("haas", "haas"), ("kick", "sauber"), ("sauber", "sauber"),
+                     ("audi", "audi"), ("cadillac", "cadillac")):
+        if key in n:
+            return F1_TEAM_COLORS[cid]
+    return FG_DIM
+
+
+# --------------------------------------------------------- live F1 timing ---
+F1_TRACK_STATUS = {"2": "YELLOW FLAG", "4": "SAFETY CAR", "5": "RED FLAG",
+                   "6": "VIRTUAL SAFETY CAR", "7": "VSC ENDING"}
+
+
+def deep_merge(dst, src):
+    """Apply a live-timing delta (nested dicts; lists patched by index)."""
+    if isinstance(dst, dict) and isinstance(src, dict):
+        for k, v in src.items():
+            if k == "_deleted":
+                for key in v if isinstance(v, list) else []:
+                    dst.pop(str(key), None)
+                continue
+            if k in dst and isinstance(dst[k], (dict, list)) and isinstance(v, (dict, list)):
+                dst[k] = deep_merge(dst[k], v)
+            else:
+                dst[k] = v
+        return dst
+    if isinstance(dst, list) and isinstance(src, dict):
+        for k, v in src.items():
+            try:
+                i = int(k)
+            except ValueError:
+                continue
+            while len(dst) <= i:
+                dst.append({})
+            dst[i] = deep_merge(dst[i], v) if isinstance(dst[i], (dict, list)) and \
+                isinstance(v, (dict, list)) else v
+        return dst
+    return src
+
+
+def extract_f1_token(text):
+    """Accept the F1 'login-session' cookie value (URL-encoded JSON), the JSON
+    itself, or a bare token, and return the subscription token."""
+    t = (text or "").strip().strip('"')
+    if "%7B" in t or "%22" in t:
+        t = urllib.parse.unquote(t)
+    m = re.search(r'"subscriptionToken"\s*:\s*"([^"]+)"', t)
+    if m:
+        return m.group(1)
+    if t.lower().startswith("bearer "):
+        t = t[7:].strip()
+    if re.fullmatch(r"[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+", t):
+        return t
+    return ""
+
+
+def jwt_expiry(token):
+    try:
+        part = token.split(".")[1]
+        part += "=" * (-len(part) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(part)).get("exp")
+        return datetime.fromtimestamp(int(exp), tz=timezone.utc) if exp else None
+    except Exception:
+        return None
+
+
+def gap_seconds(v):
+    """'+4.128' -> 4.128; '' / LEADER -> 0.0; lapped or unknown -> None."""
+    if v in (None, "") or str(v).upper() in ("LEADER", "LAP", "-"):
+        return 0.0 if v in (None, "") or str(v).upper() in ("LEADER", "-") else None
+    s_ = str(v).strip().lstrip("+")
+    if "L" in s_.upper():
+        return None
+    try:
+        if ":" in s_:
+            parts = [float(x) for x in s_.split(":")]
+            sec = 0.0
+            for x in parts:
+                sec = sec * 60 + x
+            return sec
+        return float(s_)
+    except ValueError:
+        return None
+
+
+def fill_intervals(rows):
+    """Give every car a split to the car ahead, deriving it from the gaps to the
+    leader when the feed doesn't send intervals directly."""
+    prev = None
+    for i, r in enumerate(rows):
+        if i == 0:
+            r["interval"] = "LEADER"
+            r["gap"] = r.get("gap") if r.get("gap") not in ("", None, "0", "0.000") else ""
+            prev = 0.0
+            continue
+        g = gap_seconds(r.get("gap"))
+        if not r.get("interval"):
+            if g is not None and prev is not None and g >= prev and g > 0:
+                r["interval"] = f"+{g - prev:.3f}"
+            elif r.get("gap") and str(r["gap"]).upper().endswith(("L", "LAP", "LAPS")):
+                r["interval"] = str(r["gap"])
+        prev = g
+    return rows
+
+
+def f1_rows_from_timing(state):
+    """Turn F1 live-timing state (TimingData, DriverList...) into ticker rows."""
+    lines = (state.get("TimingData") or {}).get("Lines") or {}
+    drivers = state.get("DriverList") or {}
+    rows = []
+    for num, ln in lines.items():
+        if not isinstance(ln, dict):
+            continue
+        d = drivers.get(num) or {}
+        try:
+            pos = int(ln.get("Position") or ln.get("Line") or d.get("Line") or 99)
+        except (TypeError, ValueError):
+            pos = 99
+        gap = ln.get("GapToLeader")
+        gap = gap.get("Value") if isinstance(gap, dict) else gap
+        iv = ln.get("IntervalToPositionAhead")
+        iv = iv.get("Value") if isinstance(iv, dict) else iv
+        status = "OUT" if ln.get("Retired") or ln.get("Stopped") else \
+            "PIT" if ln.get("InPit") else ""
+        team = d.get("TeamName", "")
+        rows.append({"pos": pos, "num": str(num), "code": d.get("Tla") or str(num),
+                     "name": (d.get("FullName") or "").title(), "team": team,
+                     "color": ("#" + d["TeamColour"].lstrip("#")) if d.get("TeamColour")
+                     else f1_color_for(team),
+                     "gap": gap or "", "interval": iv or "",
+                     "laps": ln.get("NumberOfLaps", ""), "pits": ln.get("NumberOfPitStops", ""),
+                     "status": status})
+    rows.sort(key=lambda r: r["pos"])
+    lap = state.get("LapCount") or {}
+    ts = state.get("TrackStatus") or {}
+    info = state.get("SessionInfo") or {}
+    return {"rows": rows,
+            "lap": f"{lap.get('CurrentLap')}/{lap.get('TotalLaps')}" if lap.get("CurrentLap") else "",
+            "track": F1_TRACK_STATUS.get(str(ts.get("Status")), ""),
+            "session": info.get("Name") or info.get("Type") or "",
+            "finished": (state.get("SessionStatus") or {}).get("Status") in ("Finished", "Finalised",
+                                                                             "Ends")}
+
+
+def _espn_stat(c, names):
+    """Find a value in an ESPN competitor by any of several field/stat names."""
+    want = {n.lower() for n in names}
+    for k, v in c.items():
+        if k.lower() in want and not isinstance(v, (dict, list)):
+            return str(v)
+    for st in c.get("statistics") or []:
+        if not isinstance(st, dict):
+            continue
+        keys = {str(st.get(x, "")).lower() for x in ("name", "abbreviation", "shortDisplayName")}
+        if keys & want:
+            return str(st.get("displayValue") or st.get("value") or "")
+    return ""
+
+
+def espn_f1_live(data):
+    """Running order of an in-progress F1 session from ESPN's racing feed."""
+    for ev in data.get("events") or []:
+        for comp in ev.get("competitions") or []:
+            st = ((comp.get("status") or {}).get("type") or {})
+            if st.get("state") != "in":
+                continue
+            typ = comp.get("type") or {}
+            rows = []
+            for c in comp.get("competitors") or []:
+                ath = c.get("athlete") or {}
+                last = ath.get("lastName") or (ath.get("displayName") or "").split(" ")[-1]
+                code = ath.get("abbreviation") or last[:3].upper()
+                team = ((c.get("vehicle") or {}).get("manufacturer") or
+                        (c.get("team") or {}).get("displayName") or "")
+                try:
+                    pos = int(c.get("order") or 99)
+                except (TypeError, ValueError):
+                    pos = 99
+                rows.append({"pos": pos, "num": str((c.get("vehicle") or {}).get("number", "")),
+                             "code": code, "name": ath.get("displayName", ""), "team": team,
+                             "color": f1_color_for(team),
+                             "gap": _espn_stat(c, ("behind", "gapToLeader", "behindLeader",
+                                                   "timeBehind", "gap", "totalTime", "time")),
+                             "interval": _espn_stat(c, ("interval", "behindNext", "gapToNext",
+                                                        "intervalToPositionAhead")),
+                             "laps": _espn_stat(c, ("laps", "lapsCompleted")),
+                             "pits": _espn_stat(c, ("pitStops", "pits")), "status": ""})
+            rows.sort(key=lambda r: r["pos"])
+            # Total race times instead of gaps? Convert to gaps to the leader.
+            if rows and ":" in str(rows[0]["gap"]):
+                lead = gap_seconds(rows[0]["gap"])
+                for r in rows:
+                    g = gap_seconds(r["gap"])
+                    r["gap"] = "" if r is rows[0] else (f"+{g - lead:.3f}" if g is not None and
+                                                         lead is not None else r["gap"])
+            per = (comp.get("status") or {}).get("period")
+            return {"rows": rows, "lap": str(per) if per else "",
+                    "track": "", "session": typ.get("abbreviation") or typ.get("text") or "",
+                    "finished": False}
+    return None
+
+
+class F1AuthError(Exception):
+    pass
+
+
+class F1LiveTiming:
+    """Minimal SignalR Core client (JSON protocol over a WebSocket, standard
+    library only) for F1's official live timing. Runs on its own thread and
+    keeps the merged live state; the UI reads snapshots."""
+
+    TOPICS = ["TimingData", "DriverList", "LapCount", "SessionInfo", "SessionStatus",
+              "TrackStatus"]
+
+    def __init__(self, token, host="livetiming.formula1.com", secure=True, port=None):
+        self.token, self.host, self.secure = token, host, secure
+        self.port = port or (443 if secure else 80)
+        self.state = {}
+        self.lock = threading.Lock()
+        self.send_lock = threading.Lock()
+        self.status = "Connecting to F1 live timing…"
+        self.auth_failed = False
+        self._stop = threading.Event()
+        self.sock = None
+        self._buf = b""
+        self._frag, self._frag_op = [], None
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self.thread.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+        try:
+            if self.sock:
+                self.sock.close()
+        except OSError:
+            pass
+
+    def snapshot(self):
+        with self.lock:
+            return copy.deepcopy(self.state)
+
+    # -- connection loop --
+    def _run(self):
+        delay = 5
+        while not self._stop.is_set():
+            try:
+                self._session()
+                delay = 5
+            except F1AuthError as e:
+                self.auth_failed = True
+                self.status = f"F1 sign-in was rejected ({e}). Update your F1 token."
+                self._stop.wait(300)
+                continue
+            except Exception as e:  # noqa: BLE001
+                if self._stop.is_set():
+                    break
+                self.status = f"Reconnecting to F1 live timing… ({e.__class__.__name__})"
+            finally:
+                try:
+                    if self.sock:
+                        self.sock.close()
+                except OSError:
+                    pass
+            self._stop.wait(delay)
+            delay = min(delay * 2, 60)
+
+    def _negotiate(self):
+        scheme = "https" if self.secure else "http"
+        url = f"{scheme}://{self.host}:{self.port}/signalrcore/negotiate?negotiateVersion=1"
+        req = urllib.request.Request(url, data=b"", method="POST", headers={
+            "Authorization": f"Bearer {self.token}", "User-Agent": BROWSER_UA,
+            "Content-Type": "text/plain;charset=UTF-8"})
+        try:
+            resp = urllib.request.urlopen(req, timeout=15)
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                raise F1AuthError(f"HTTP {e.code}")
+            raise
+        body = json.loads(resp.read().decode("utf-8") or "{}")
+        cookies = "; ".join(c.split(";", 1)[0] for c in resp.headers.get_all("Set-Cookie") or [])
+        return body.get("connectionToken") or body.get("connectionId") or "", cookies
+
+    def _session(self):
+        conn, cookies = self._negotiate()
+        raw = socket.create_connection((self.host, self.port), timeout=20)
+        self.sock = ssl.create_default_context().wrap_socket(raw, server_hostname=self.host) \
+            if self.secure else raw
+        self._buf, self._frag, self._frag_op = b"", [], None
+        key = base64.b64encode(os.urandom(16)).decode()
+        path = "/signalrcore?id=" + urllib.parse.quote(conn, safe="")
+        head = [f"GET {path} HTTP/1.1", f"Host: {self.host}", "Upgrade: websocket",
+                "Connection: Upgrade", f"Sec-WebSocket-Key: {key}", "Sec-WebSocket-Version: 13",
+                f"Authorization: Bearer {self.token}", f"User-Agent: {BROWSER_UA}",
+                "Origin: https://www.formula1.com"]
+        if cookies:
+            head.append(f"Cookie: {cookies}")
+        self.sock.sendall(("\r\n".join(head) + "\r\n\r\n").encode())
+        resp = b""
+        while b"\r\n\r\n" not in resp:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("closed during handshake")
+            resp += chunk
+        top, self._buf = resp.split(b"\r\n\r\n", 1)
+        status_line = top.split(b"\r\n")[0].decode("latin-1")
+        if " 101" not in status_line:
+            if " 401" in status_line or " 403" in status_line:
+                raise F1AuthError(status_line.split(" ", 1)[-1])
+            raise ConnectionError(status_line)
+        self._send_text('{"protocol":"json","version":1}\x1e')
+        self._send_text(json.dumps({"type": 1, "invocationId": "1", "target": "Subscribe",
+                                    "arguments": [self.TOPICS]}) + "\x1e")
+        self.status = "Connected to F1 live timing — waiting for data"
+        self.sock.settimeout(5)
+        last_ping, pending = time.time(), ""
+        while not self._stop.is_set():
+            if time.time() - last_ping > 15:
+                self._send_text('{"type":6}\x1e')
+                last_ping = time.time()
+            try:
+                op, payload = self._recv_message()
+            except socket.timeout:
+                continue
+            if op == 8:
+                raise ConnectionError("server closed the connection")
+            if op == 9:
+                self._send_frame(10, payload)
+                continue
+            if op != 1:
+                continue
+            pending += payload.decode("utf-8", "replace")
+            *msgs, pending = pending.split("\x1e")
+            for m in msgs:
+                if m.strip():
+                    self._handle(json.loads(m))
+
+    def _handle(self, msg):
+        t = msg.get("type")
+        if t is None and msg.get("error"):
+            raise ConnectionError(msg["error"])
+        if t == 3:
+            if msg.get("error"):
+                err = str(msg["error"])
+                if "auth" in err.lower() or "401" in err:
+                    raise F1AuthError(err)
+                self.status = f"F1 live timing refused the subscription: {err}"
+                return
+            if isinstance(msg.get("result"), dict):
+                with self.lock:
+                    for k, v in msg["result"].items():
+                        self.state[k] = v
+                self.status = "Live"
+        elif t == 1 and msg.get("target") == "feed":
+            args = msg.get("arguments") or []
+            if len(args) >= 2:
+                topic, data = args[0], args[1]
+                with self.lock:
+                    if isinstance(data, dict):
+                        self.state[topic] = deep_merge(self.state.get(topic) or {}, data)
+                    else:
+                        self.state[topic] = data
+                self.status = "Live"
+        elif t == 7:
+            raise ConnectionError(msg.get("error") or "server closed the connection")
+
+    # -- WebSocket framing --
+    def _send_frame(self, op, payload):
+        n = len(payload)
+        mask = os.urandom(4)
+        hdr = bytes([0x80 | op])
+        if n < 126:
+            hdr += bytes([0x80 | n])
+        elif n < 65536:
+            hdr += bytes([0x80 | 126]) + struct.pack(">H", n)
+        else:
+            hdr += bytes([0x80 | 127]) + struct.pack(">Q", n)
+        body = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        with self.send_lock:
+            self.sock.sendall(hdr + mask + body)
+
+    def _send_text(self, text):
+        self._send_frame(1, text.encode("utf-8"))
+
+    def _parse_frame(self):
+        b = self._buf
+        if len(b) < 2:
+            return None
+        fin, op = b[0] & 0x80, b[0] & 0x0F
+        masked, ln, i = b[1] & 0x80, b[1] & 0x7F, 2
+        if ln == 126:
+            if len(b) < 4:
+                return None
+            ln, i = struct.unpack(">H", b[2:4])[0], 4
+        elif ln == 127:
+            if len(b) < 10:
+                return None
+            ln, i = struct.unpack(">Q", b[2:10])[0], 10
+        mask = b""
+        if masked:
+            if len(b) < i + 4:
+                return None
+            mask, i = b[i:i + 4], i + 4
+        if len(b) < i + ln:
+            return None
+        payload = b[i:i + ln]
+        if masked:
+            payload = bytes(c ^ mask[j % 4] for j, c in enumerate(payload))
+        self._buf = b[i + ln:]
+        return bool(fin), op, payload
+
+    def _recv_message(self):
+        """Next complete message (control frames returned immediately). A
+        socket timeout never loses data: nothing is consumed until a whole
+        frame has arrived."""
+        while True:
+            f = self._parse_frame()
+            if f is None:
+                chunk = self.sock.recv(65536)
+                if not chunk:
+                    raise ConnectionError("connection closed")
+                self._buf += chunk
+                continue
+            fin, op, payload = f
+            if op >= 8:
+                return op, payload
+            if op != 0:
+                self._frag_op, self._frag = op, []
+            self._frag.append(payload)
+            if fin:
+                data, op_ = b"".join(self._frag), self._frag_op
+                self._frag, self._frag_op = [], None
+                return op_, data
+
 NHL_TEAM_COLORS = {
     "ANA": "#F47A38", "BOS": "#FFB81C", "BUF": "#2E6BD1", "CGY": "#C8102E",
     "CAR": "#CE1126", "CHI": "#CF0A2C", "COL": "#8A2E4D", "CBJ": "#2B5CA8",
@@ -151,7 +602,8 @@ TWO_WORD_NICKS = {"Maple Leafs", "Red Wings", "Blue Jackets", "Golden Knights",
 CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "SportsTicker")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 DEFAULT_CONFIG = {"league": "nhl", "position": "top", "y": None, "speed": 2, "scroll": True,
-                  "topmost": True, "direction": "ltr", "reserve": True, "yt_channels": {}}
+                  "topmost": True, "direction": "ltr", "reserve": True, "yt_channels": {},
+                  "f1_token": ""}
 
 
 def load_config():
@@ -752,6 +1204,14 @@ class Ticker:
         self.standings_cache = {}     # league -> (timestamp, sections)
         self.f1 = None                # {"race": ..., "next": ...} for the F1 ticker
         self.f1_round = None          # None = latest race; else (season, round)
+        self.f1_live = None           # live race state while a race/sprint is on
+        self.f1_live_key = None
+        self.f1_live_job = None
+        self.f1_stream = None         # F1LiveTiming client (when signed in)
+        self._espn_f1_data = None
+        self._espn_f1_last = 0.0
+        self._espn_f1_busy = False
+        self._f1_live_sig = None
         self.refresh_job = None
         self.redraw_job = None
         self.fetch_token = 0
@@ -898,6 +1358,7 @@ class Ticker:
         self.games = []
         self.f1 = None
         self.f1_round = None
+        self._f1_live_end()
         self._label_day_menu()
         self.week_label = ""
         self.status_msg = f"Loading {LEAGUES[key]['name']} " + \
@@ -1126,6 +1587,7 @@ class Ticker:
         self.top_var = tk.BooleanVar(value=self.cfg["topmost"])
         m.add_checkbutton(label="Always on top", variable=self.top_var,
                           command=self._toggle_topmost)
+        m.add_command(label="F1 live timing sign-in…", command=self.f1_signin_dialog)
         m.add_separator()
         m.add_command(label="Exit", command=self.quit)
         m.add_separator()
@@ -1251,6 +1713,7 @@ class Ticker:
 
     def quit(self):
         save_config(self.cfg)
+        self._f1_live_end()
         self.appbar_remove()
         self.root.destroy()
 
@@ -1372,11 +1835,266 @@ class Ticker:
             self.date_lbl.configure(text=f"{shown.get('season', '')} · Round {shown.get('round', '')}")
         else:
             self.date_lbl.configure(text="F1")
+        which = self._f1_live_window(upcoming) if (upcoming and self.f1_round is None) else None
+        if which:
+            self._f1_live_begin(upcoming, which)
+        else:
+            self._f1_live_end()
         self.redraw()
         # Results land within an hour or so of the chequered flag; check every 5 min.
         self.refresh_job = self.root.after(300000, self.refresh)
 
+    # ---- F1 live race --------------------------------------------------------
+    @staticmethod
+    def _f1_live_window(race):
+        """'Race' or 'Sprint' if one is on right now (by the schedule), else None."""
+        if os.environ.get("SPORTS_TICKER_FORCE_F1_LIVE"):
+            return os.environ["SPORTS_TICKER_FORCE_F1_LIVE"]
+        now = datetime.now(timezone.utc)
+        for key, hours in (("Sprint", 1.5), (None, 3.0)):
+            st = f1_start(race.get(key) if key else race)
+            if st and st - timedelta(minutes=10) <= now <= st + timedelta(hours=hours):
+                return "Sprint" if key else "Race"
+        return None
+
+    def _f1_live_begin(self, race, which):
+        key = (race.get("season"), race.get("round"), which)
+        if self.f1_live_key == key:
+            return
+        self._f1_live_end()
+        self.f1_live_key = key
+        self.f1_live = {"race": race, "which": which, "rows": [], "source": "", "lap": "",
+                        "track": "", "note": "Waiting for live timing…"}
+        tok = self.cfg.get("f1_token")
+        if tok:
+            self.f1_stream = F1LiveTiming(tok).start()
+        self._f1_live_tick()
+
+    def _f1_live_end(self):
+        if self.f1_live_job:
+            try:
+                self.root.after_cancel(self.f1_live_job)
+            except tk.TclError:
+                pass
+        self.f1_live_job = None
+        if self.f1_stream:
+            self.f1_stream.stop()
+        self.f1_stream = None
+        self.f1_live = self.f1_live_key = self._espn_f1_data = self._f1_live_sig = None
+
+    def _f1_live_tick(self):
+        self.f1_live_job = None
+        if not self.f1_live:
+            return
+        data, note = None, ""
+        if self.f1_stream:
+            snap = self.f1_stream.snapshot()
+            if (snap.get("TimingData") or {}).get("Lines"):
+                data = f1_rows_from_timing(snap)
+                data["source"] = "F1 live timing"
+            else:
+                note = self.f1_stream.status
+        if data is None:
+            if time.time() - self._espn_f1_last > 10 and not self._espn_f1_busy:
+                self._espn_f1_busy = True
+                self._espn_f1_last = time.time()
+                self.worker.run(lambda: fetch_json(f"{ESPN_API}/racing/f1/scoreboard"),
+                                self._on_espn_f1,
+                                lambda e: setattr(self, "_espn_f1_busy", False))
+            if self._espn_f1_data:
+                data = dict(self._espn_f1_data)
+                data["rows"] = [dict(r) for r in self._espn_f1_data["rows"]]
+                data["source"] = "ESPN" + (" (F1 sign-in not connected)" if self.f1_stream else "")
+        if data and data.get("rows"):
+            fill_intervals(data["rows"])
+            data["note"] = ""
+            self.f1_live.update(data)
+        else:
+            self.f1_live["note"] = note or "Waiting for live timing…"
+        sig = (tuple((r["pos"], r["code"], r.get("interval"), r.get("status"))
+                     for r in self.f1_live["rows"]),
+               self.f1_live.get("lap"), self.f1_live.get("track"), self.f1_live.get("note"))
+        if sig != self._f1_live_sig:
+            self._f1_live_sig = sig
+            self.redraw()
+        self.f1_live_job = self.root.after(2000, self._f1_live_tick)
+
+    def _on_espn_f1(self, data):
+        self._espn_f1_busy = False
+        parsed = espn_f1_live(data)
+        if parsed and parsed.get("rows"):
+            self._espn_f1_data = parsed
+
+    def f1_signin_dialog(self):
+        win = getattr(self, "_signin_win", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            return
+        style_once(self.root)
+        win = tk.Toplevel(self.root, bg=BG)
+        self._signin_win = win
+        win.title("F1 live timing sign-in")
+        w, h = int(620 * self.scale), int(560 * self.scale)
+        win.geometry(f"{w}x{h}+{(self.root.winfo_screenwidth() - w) // 2}+"
+                     f"{(self.root.winfo_screenheight() - h) // 2}")
+        win.attributes("-topmost", True)
+        win.after(400, lambda: win.winfo_exists() and win.attributes("-topmost", False))
+        pad = {"padx": 18, "anchor": "w"}
+        tk.Label(win, text="F1 live timing sign-in", font=("Segoe UI", 15, "bold"), bg=BG,
+                 fg=FG).pack(pady=(16, 6), **pad)
+        tk.Label(win, justify="left", wraplength=w - 40, bg=BG, fg=FG, font=("Segoe UI", 10),
+                 text="Without signing in, the F1 ticker shows the live running order from "
+                      "ESPN during races. Signing in with your F1 account connects to F1's "
+                      "official live timing, which adds the exact gap between every driver.\n\n"
+                      "1.  In your web browser, sign in at formula1.com with your F1 account "
+                      "(F1 TV).\n"
+                      "2.  Press F12 to open the developer tools, then go to Application "
+                      "(Chrome or Edge) or Storage (Firefox) > Cookies > "
+                      "https://www.formula1.com.\n"
+                      "3.  Click the cookie named login-session and copy its Value.\n"
+                      "4.  Paste it below and click Save.\n\n"
+                      "The sign-in lasts a few days; when it runs out, the ticker tells you, "
+                      "and you repeat these steps. It's stored only on this PC, in the "
+                      "ticker's settings file.").pack(**pad)
+        box = tk.Text(win, height=5, bg="#0b1017", fg=FG, insertbackground=FG, relief="flat",
+                      font=("Consolas", 9), wrap="char")
+        box.pack(fill="x", padx=18, pady=(12, 6))
+        status = tk.Label(win, text="", bg=BG, fg=FG_DIM, font=("Segoe UI", 9), justify="left",
+                          wraplength=w - 40)
+        status.pack(**pad)
+
+        def show():
+            tok = self.cfg.get("f1_token")
+            if not tok:
+                status.configure(text="Not signed in: live races use ESPN's running order.",
+                                 fg=FG_DIM)
+                return
+            exp = jwt_expiry(tok)
+            if exp and exp < datetime.now(timezone.utc):
+                status.configure(text="Your F1 sign-in has expired. Paste a fresh "
+                                      "login-session value to renew it.", fg=LIVE)
+            elif exp:
+                status.configure(text="Signed in. Valid until " +
+                                      exp.astimezone().strftime("%a %b %d, %I:%M %p"), fg=GOOD)
+            else:
+                status.configure(text="Signed in.", fg=GOOD)
+
+        def restart_stream():
+            if self.f1_live:
+                race, which = self.f1_live["race"], self.f1_live["which"]
+                self._f1_live_end()
+                self._f1_live_begin(race, which)
+
+        def save():
+            tok = extract_f1_token(box.get("1.0", "end"))
+            if not tok:
+                status.configure(text="That doesn't look like the login-session cookie value. "
+                                      "Copy the whole Value and try again.", fg=LIVE)
+                return
+            self.cfg["f1_token"] = tok
+            save_config(self.cfg)
+            box.delete("1.0", "end")
+            show()
+            restart_stream()
+
+        def remove():
+            self.cfg["f1_token"] = ""
+            save_config(self.cfg)
+            show()
+            restart_stream()
+
+        btns = tk.Frame(win, bg=BG)
+        btns.pack(fill="x", padx=18, pady=12)
+        for label, cmd, bg in (("Save", save, ACCENT), ("Sign out", remove, "#3a4656"),
+                               ("Close", win.destroy, "#3a4656")):
+            b = tk.Label(btns, text=label, bg=bg, fg="white", font=("Segoe UI", 10, "bold"),
+                         padx=14, pady=5, cursor="hand2")
+            b.pack(side="left", padx=(0, 8))
+            b.bind("<Button-1>", lambda e, c=cmd: c())
+        win.bind("<Escape>", lambda e: win.destroy())
+        show()
+
+    def _draw_f1_live_seq(self, x, cy):
+        c = self.canvas
+        u = self.scale * K
+        live = self.f1_live
+        race = live["race"]
+
+        def chip(x0, draw, tag):
+            x = draw(x0 + 14 * u)
+            bg = c.create_rectangle(x0, 0, x + 14 * u, self.h, fill=BG, outline="",
+                                    tags=("content", tag, "bg"))
+            c.tag_lower(bg)
+            x += 14 * u
+            c.create_line(x, 10 * u, x, self.h - 10 * u, fill=SEP, tags=("content",))
+            c.tag_bind(tag, "<Button-1>", lambda e: self.open_f1(race))
+            c.tag_bind(tag, "<Enter>", lambda e, t=tag: self._hover(t, True))
+            c.tag_bind(tag, "<Leave>", lambda e, t=tag: self._hover(t, False))
+            return x + 1
+
+        tag = f"f1L{x:.0f}"
+
+        def head(x):
+            r = 4 * u
+            c.create_oval(x, cy - r, x + 2 * r, cy + r, fill=LIVE, outline="",
+                          tags=("content", tag))
+            x += 2 * r + 6 * u
+            i = c.create_text(x, cy, text="LIVE", anchor="w", font=self.f_status, fill=LIVE,
+                              tags=("content", tag))
+            x = c.bbox(i)[2] + 10 * u
+            name = f1_short(race.get("raceName")).upper()
+            if live["which"] == "Sprint":
+                name += " SPRINT"
+            i = c.create_text(x, cy, text=name, anchor="w", font=self.f_abbr, fill=FG,
+                              tags=("content", tag))
+            x = c.bbox(i)[2] + 10 * u
+            if live.get("lap"):
+                i = c.create_text(x, cy, text=f"LAP {live['lap']}", anchor="w",
+                                  font=self.f_status, fill=FG_DIM, tags=("content", tag))
+                x = c.bbox(i)[2] + 10 * u
+            if live.get("track"):
+                i = c.create_text(x, cy, text=live["track"], anchor="w", font=self.f_status,
+                                  fill="#ffd166", tags=("content", tag))
+                x = c.bbox(i)[2] + 10 * u
+            if not live["rows"]:
+                i = c.create_text(x, cy, text=live.get("note") or "", anchor="w",
+                                  font=self.f_dim, fill=FG_DIM, tags=("content", tag))
+                x = c.bbox(i)[2]
+            return x
+        x = chip(x, head, tag)
+        for n, r in enumerate(live["rows"]):
+            tag = f"f1l{n}_{x:.0f}"
+
+            def drv(x, r=r, tag=tag):
+                pos = r["pos"]
+                i = c.create_text(x, cy, text=str(pos), anchor="w", font=self.f_score,
+                                  fill=PODIUM.get(pos, FG_DIM), tags=("content", tag))
+                x = c.bbox(i)[2] + 7 * u
+                c.create_rectangle(x, cy - 8 * u, x + 4 * u, cy + 8 * u, fill=r["color"],
+                                   outline="", tags=("content", tag))
+                x += 9 * u
+                i = c.create_text(x, cy, text=r["code"], anchor="w", font=self.f_abbr, fill=FG,
+                                  tags=("content", tag))
+                x = c.bbox(i)[2] + 7 * u
+                split = r.get("interval") or ""
+                if split:
+                    i = c.create_text(x, cy, text=split, anchor="w", font=self.f_dim,
+                                      fill=ACCENT if split == "LEADER" else FG_DIM,
+                                      tags=("content", tag))
+                    x = c.bbox(i)[2]
+                if r.get("status"):
+                    i = c.create_text(x + 8 * u, cy, text=r["status"], anchor="w",
+                                      font=self.f_status,
+                                      fill="#ffd166" if r["status"] == "PIT" else LIVE,
+                                      tags=("content", tag))
+                    x = c.bbox(i)[2]
+                return x
+            x = chip(x, drv, tag)
+        return x
+
     def _draw_f1_seq(self, x, cy):
+        if self.f1_live:
+            return self._draw_f1_live_seq(x, cy)
         c = self.canvas
         u = self.scale * K
         race, nxt = self.f1.get("race"), self.f1.get("next")
@@ -1597,7 +2315,7 @@ class Ticker:
         cy = self.h // 2
         cw = max(c.winfo_width(), 1)
         if self.league == "f1":
-            has = bool(self.f1 and (self.f1.get("race") or self.f1.get("next")))
+            has = bool(self.f1_live or (self.f1 and (self.f1.get("race") or self.f1.get("next"))))
             draw = self._draw_f1_seq
         else:
             has = bool(self.games)
@@ -2753,12 +3471,58 @@ class F1Window:
         self.msg = tk.Label(self.top, text="Loading…", bg=BG, fg=FG_DIM, font=("Segoe UI", 9))
         self.msg.pack(side="bottom", fill="x", pady=(0, 6))
         self.tabs = {}
+        self.live_tree = None
+        live = ticker.f1_live
+        if live and (live["race"].get("season"), live["race"].get("round")) == \
+                (race.get("season"), race.get("round")):
+            fr = ttk.Frame(self.nb, padding=8)
+            self.nb.add(fr, text=f"Live {live['which'].lower()}")
+            self.live_info = tk.Label(fr, text="", bg=BG_PANEL, fg=LIVE,
+                                      font=("Segoe UI", 10, "bold"), anchor="w")
+            self.live_info.pack(fill="x", pady=(0, 6))
+            f, self.live_tree = make_tree(fr, [
+                ("pos", "Pos", 44), ("num", "No.", 44), ("name", "Driver", 190),
+                ("team", "Team", 150), ("int", "Interval", 90), ("gap", "Gap to leader", 110),
+                ("laps", "Laps", 50), ("pits", "Pit stops", 70), ("st", "Status", 60)], 20,
+                sortable=False)
+            f.pack(fill="both", expand=True)
+            self.live_tree.tag_configure("p1", foreground=PODIUM[1])
+            self.live_tree.tag_configure("p2", foreground=PODIUM[2])
+            self.live_tree.tag_configure("p3", foreground=PODIUM[3])
+            self.summary.configure(text="Race in progress: live standings in the first tab.")
+            self._live_refresh()
         if results:
             fr, tree = self._tab("Race results", self.RESULT_COLS)
             self._fill_results(tree, results)
         else:
             self._fill_schedule()        # upcoming race: schedule first
         self.load()
+
+    def _live_refresh(self):
+        if not self.alive or self.live_tree is None:
+            return
+        live = self.ticker.f1_live
+        if live:
+            bits = ["LIVE"]
+            if live.get("lap"):
+                bits.append(f"Lap {live['lap']}")
+            if live.get("track"):
+                bits.append(live["track"].title())
+            if live.get("source"):
+                bits.append(f"Source: {live['source']}")
+            if not live.get("rows"):
+                bits.append(live.get("note") or "Waiting for live timing…")
+            self.live_info.configure(text="   ·   ".join(bits))
+            self._insert(self.live_tree, [
+                (r["pos"], r.get("num", ""), r.get("name") or r["code"], r.get("team", ""),
+                 r.get("interval", ""), r.get("gap", "") or ("" if r["pos"] != 1 else "—"),
+                 r.get("laps", ""), r.get("pits", ""), r.get("status", ""))
+                for r in live["rows"]])
+        else:
+            self.live_info.configure(text="The session has finished. Final results appear "
+                                          "here shortly after the race.", fg=FG_DIM)
+            return
+        self.top.after(2000, self._live_refresh)
 
     def _tab(self, title, cols, height=20):
         fr = ttk.Frame(self.nb, padding=8)

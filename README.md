@@ -1,6 +1,6 @@
 # Sports Score Ticker for Windows
 
-**NHL · NFL · MLB · NBA · Bundesliga · F1** · Version 2.5.0 (see `CHANGELOG.md` for what changed in each version)
+**NHL · NFL · MLB · NBA · Bundesliga · F1** · Version 2.6.0 (see `CHANGELOG.md` for what changed in each version)
 
 An always-on-top bar that scrolls every game for the day in the league you
 pick. It moves continuously from left to right and wraps around in a seamless
@@ -42,6 +42,7 @@ folder (and its startup shortcut, if you made one). This version includes the NH
 | Mouse wheel | Scrolls through games by hand |
 | Right-click | Settings: league, refresh, previous/next day, scroll on/off, speed, direction, position, always-on-top, exit |
 | Drag the league logo | Moves the bar between the top and bottom of the screen |
+| Right-click → F1 live timing sign-in… | Connects F1 races to F1's official live timing for exact gaps (optional) |
 | Right-click → What's new… | Shows the changelog; the version number is at the bottom of the menu |
 | ↻ at the right end | Refresh now |
 | **X** at the far right | Close the ticker |
@@ -78,6 +79,27 @@ F1 works a little differently, because it's races rather than games:
 - In the right-click menu, the day buttons become **Previous race**, **Latest
   race** and **Next race**.
 - Results are published shortly after each race. The ticker checks every 5 minutes.
+
+### Live races
+
+While a Grand Prix or sprint is running, the F1 ticker switches to a live view:
+**LIVE**, the race, the lap, and any safety car, VSC or flag. Then every driver
+in their current position with the **split to the car ahead** (PIT and OUT are
+marked). Click it for the **Live race** tab, which shows the interval, gap to
+the leader, laps and pit stops for every car, updating every 2 seconds. The
+live view starts 10 minutes before lights out and switches back to the final
+results once they're published.
+
+There are two sources for the live data:
+
+- **Free, no setup:** the live running order from ESPN. When ESPN's feed
+  includes gaps, the splits between cars are worked out from them.
+- **Exact gaps with your F1 account:** right-click → **F1 live timing
+  sign-in…** connects to F1's official live timing, the same data the official
+  F1 app uses. The window walks you through copying your sign-in from
+  formula1.com. It lasts a few days at a time; when it runs out, the ticker
+  tells you and falls back to ESPN until you sign in again. The sign-in is
+  stored only on your PC.
 
 ## The game stats window
 
@@ -126,7 +148,9 @@ Live games update every 20 seconds while the window is open. Press `Esc` to clos
   NFL, MLB, NBA and Bundesliga scores and stats come from ESPN's public feed
   (`site.api.espn.com`), and all team and league logos come from ESPN's image
   server. F1 results, qualifying and standings come from the Jolpica F1 API
-  (`api.jolpi.ca`), the community-run successor to Ergast. None of these feeds
+  (`api.jolpi.ca`), the community-run successor to Ergast. Live F1 race order
+  comes from ESPN, or from F1's official live timing
+  (`livetiming.formula1.com`) when you sign in. None of these feeds
   needs a key, but none is officially documented, so any of them could change
   without notice. If a section ever shows blank, the feed
   has probably changed shape; the rest of the app keeps working. If a logo

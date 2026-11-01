@@ -4,6 +4,26 @@ All notable changes to the Sports Ticker. Newest first.
 Version numbers: **major.minor.patch**. A major bump means a big change in
 what the app is, minor means new features, and patch means fixes and small tweaks.
 
+## 2.6.0 — 2026-11-01
+### Added
+- **Live F1 race standings.** While a Grand Prix or sprint is running, the F1
+  ticker switches to a live view: a red LIVE marker, the race, the lap, and
+  any safety car, VSC, red or yellow flag. Then every driver in their current
+  position with the **split to the car ahead** (the leader shows LEADER).
+  Drivers in the pit lane show PIT; retirements show OUT.
+- **Live race tab** in the F1 race window: position, driver, team, interval to
+  the car ahead, gap to the leader, laps, pit stops and status, updating every
+  2 seconds.
+- **Two live sources:**
+  - *Free, no setup:* the live running order from ESPN. When ESPN includes
+    gaps, the splits between cars are worked out from them.
+  - *Optional F1 sign-in* (right-click → **F1 live timing sign-in…**):
+    connects to F1's official live timing for exact gaps and intervals between
+    every driver. It uses your F1 account (F1 TV), and the window walks you
+    through it. If the sign-in expires, the ticker says so and falls back to ESPN.
+- The live view starts automatically 10 minutes before the race or sprint and
+  hands back to the final results once they're published.
+
 ## 2.5.0 — 2026-11-01
 ### Added
 - **F1** as a sixth choice in the league drop-down (results from the Jolpica
