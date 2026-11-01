@@ -1,7 +1,7 @@
 """
 Sports Score Ticker for Windows  (NHL · NFL · MLB · NBA · Bundesliga · F1)
 --------------------------------------------------------------------------
-Version 2.7.0 (see CHANGELOG.md for the history of changes)
+Version 2.8.0 (see CHANGELOG.md for the history of changes)
 
 An always-on-top bar that scrolls every game for the day in the league you
 pick. Click any game for its full stats: line score, team stats, scoring
@@ -36,6 +36,7 @@ import re
 import socket
 import ssl
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -48,12 +49,12 @@ import urllib.request
 import webbrowser
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta, timezone
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 NHL_API = "https://api-web.nhle.com/v1"
 ESPN_API = "https://site.api.espn.com/apis/site/v2/sports"
 JOLPICA = "https://api.jolpi.ca/ergast/f1"
-APP_VERSION = "2.7.0"
+APP_VERSION = "2.8.0"
 USER_AGENT = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) SportsTicker/{APP_VERSION}"
 
 # ---------------------------------------------------------------- theme ----
@@ -130,18 +131,59 @@ def f1_full_name(d):
     return f"{d.get('givenName', '')} {d.get('familyName', '')}".strip()
 
 
+F1_TEAM_MATCH = (("racing bull", "rb"), ("visa", "rb"), ("alphatauri", "rb"),
+                 ("toro rosso", "rb"), ("red bull", "red_bull"), ("ferrari", "ferrari"),
+                 ("mercedes", "mercedes"), ("mclaren", "mclaren"), ("aston", "aston_martin"),
+                 ("alpine", "alpine"), ("williams", "williams"), ("haas", "haas"),
+                 ("kick", "sauber"), ("stake", "sauber"), ("sauber", "sauber"),
+                 ("audi", "audi"), ("cadillac", "cadillac"), ("andretti", "cadillac"))
+
+
 def f1_color_for(team_name="", constructor_id=""):
-    if constructor_id in F1_TEAM_COLORS:
-        return F1_TEAM_COLORS[constructor_id]
-    n = (team_name or "").lower()
-    for key, cid in (("racing bulls", "rb"), ("visa", "rb"), ("red bull", "red_bull"),
-                     ("ferrari", "ferrari"), ("mercedes", "mercedes"), ("mclaren", "mclaren"),
-                     ("aston", "aston_martin"), ("alpine", "alpine"), ("williams", "williams"),
-                     ("haas", "haas"), ("kick", "sauber"), ("sauber", "sauber"),
-                     ("audi", "audi"), ("cadillac", "cadillac")):
-        if key in n:
-            return F1_TEAM_COLORS[cid]
+    """A team's colour from its Jolpica constructorId or any form of its name
+    (Jolpica, ESPN and F1 live timing all spell teams differently)."""
+    cid = (constructor_id or "").lower()
+    if cid in F1_TEAM_COLORS:
+        return F1_TEAM_COLORS[cid]
+    for text in (cid.replace("_", " "), (team_name or "").lower()):
+        if not text:
+            continue
+        for key, team in F1_TEAM_MATCH:
+            if key in text:
+                return F1_TEAM_COLORS[team]
+        if text == "rb" or text.startswith("rb "):
+            return F1_TEAM_COLORS["rb"]
     return FG_DIM
+
+
+def f1_team_color(r):
+    con = r.get("Constructor") or {}
+    return f1_color_for(con.get("name", ""), con.get("constructorId", ""))
+
+
+def f1_splits(results):
+    """Gap from each finisher to the car directly in front. The winner keeps
+    their race time; lapped and retired cars keep their status (+1 Lap, DNF)."""
+    out, prev_ms, prev_gap = [], None, 0.0
+    for i, r in enumerate(results):
+        t = r.get("Time") or {}
+        try:
+            ms = int(t.get("millis"))
+        except (TypeError, ValueError):
+            ms = None
+        if i == 0:
+            out.append(t.get("time") or f1_result_text(r))
+            prev_ms, prev_gap = ms, 0.0
+            continue
+        gap = gap_seconds(t.get("time")) if t.get("time") else None
+        if ms is not None and prev_ms is not None and ms >= prev_ms:
+            out.append(f"+{(ms - prev_ms) / 1000:.3f}")
+        elif gap is not None and prev_gap is not None and gap >= prev_gap:
+            out.append(f"+{gap - prev_gap:.3f}")
+        else:
+            out.append(f1_result_text(r))
+        prev_ms, prev_gap = ms, gap
+    return out
 
 
 # --------------------------------------------------------- live F1 timing ---
@@ -316,7 +358,7 @@ def espn_f1_live(data):
                     pos = 99
                 rows.append({"pos": pos, "num": str((c.get("vehicle") or {}).get("number", "")),
                              "code": code, "name": ath.get("displayName", ""), "team": team,
-                             "color": f1_color_for(team),
+                             "color": f1_color_for(team, str((c.get("team") or {}).get("abbreviation", ""))),
                              "gap": _espn_stat(c, ("behind", "gapToLeader", "behindLeader",
                                                    "timeBehind", "gap", "totalTime", "time")),
                              "interval": _espn_stat(c, ("interval", "behindNext", "gapToNext",
@@ -1597,11 +1639,84 @@ class Ticker:
                           command=self._toggle_topmost)
         m.add_command(label="F1 live timing sign-in…", command=self.f1_signin_dialog)
         m.add_separator()
+        m.add_command(label="Uninstall Sports Ticker…", command=self.uninstall)
         m.add_command(label="Exit", command=self.quit)
         m.add_separator()
         m.add_command(label="What's new…", command=self.show_changelog)
         m.add_command(label=f"Sports Ticker v{APP_VERSION}", state="disabled")
         return m
+
+    # ---- uninstall -------------------------------------------------------------
+    APP_FILES = ("sports_ticker.pyw", "sports_ticker.ico", "Start Sports Ticker.bat",
+                 "Build EXE.bat", "README.md", "CHANGELOG.md", ".gitignore",
+                 "SportsTicker_Setup.exe", r"installer\SportsTicker.nsi",
+                 r"installer\welcome.bmp", r"installer\header.bmp")
+
+    def _app_dir(self):
+        if getattr(sys, "frozen", False):
+            return os.path.dirname(sys.executable)
+        return os.path.dirname(os.path.abspath(__file__))
+
+    def _find_uninstaller(self):
+        cand = os.path.join(self._app_dir(), "Uninstall.exe")
+        if os.path.exists(cand):
+            return cand
+        if sys.platform == "win32":
+            try:
+                import winreg
+                key = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\SportsTicker"
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+                    path = winreg.QueryValueEx(k, "UninstallString")[0].strip('"')
+                    if os.path.exists(path):
+                        return path
+            except OSError:
+                pass
+        return None
+
+    def uninstall(self):
+        uninst = self._find_uninstaller()
+        if uninst:
+            if not messagebox.askyesno(
+                    "Uninstall Sports Ticker",
+                    "Remove Sports Ticker from this PC?\n\nThe ticker will close and the "
+                    "uninstaller will open. It removes the app and its shortcuts, and asks "
+                    "whether to keep your settings."):
+                return
+            subprocess.Popen([uninst], close_fds=True)
+            self.quit()
+            return
+        if sys.platform != "win32":
+            messagebox.showinfo("Uninstall Sports Ticker",
+                                "To remove Sports Ticker, close it and delete its folder:\n"
+                                + self._app_dir())
+            return
+        folder = self._app_dir()
+        if not messagebox.askyesno(
+                "Uninstall Sports Ticker",
+                "Sports Ticker is running from a folder rather than from the installer.\n\n"
+                "Remove it now? The ticker will close, and these are deleted:\n"
+                "•  its settings and downloaded logos\n"
+                "•  its startup and desktop shortcuts, if there are any\n"
+                f"•  the Sports Ticker files in {folder}\n\n"
+                "Anything else you've put in that folder is left alone."):
+            return
+        try:
+            import shutil
+            shutil.rmtree(CONFIG_DIR, ignore_errors=True)
+            for lnk in (os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu"
+                                     r"\Programs\Startup\Sports Ticker.lnk"),
+                        os.path.join(os.path.expanduser("~"), "Desktop", "Sports Ticker.lnk")):
+                if os.path.exists(lnk):
+                    os.remove(lnk)
+        except OSError:
+            pass
+        # Delete the app's own files once it has exited, then the folders if empty.
+        files = " ".join(f'"{os.path.join(folder, f)}"' for f in self.APP_FILES)
+        cmd = (f'ping -n 3 127.0.0.1 >nul & del /f /q {files} 2>nul & '
+               f'rmdir /s /q "{os.path.join(folder, "__pycache__")}" 2>nul & '
+               f'rmdir "{os.path.join(folder, "installer")}" 2>nul & rmdir "{folder}" 2>nul')
+        subprocess.Popen(["cmd", "/c", cmd], creationflags=0x08000000, close_fds=True)
+        self.quit()
 
     def show_changelog(self):
         win = getattr(self, "_changelog_win", None)
@@ -2144,23 +2259,23 @@ class Ticker:
                                   fill=FG_DIM, tags=("content", tag))
                 return c.bbox(i)[2]
             x = chip(x, head, tag, race)
-            for n, r in enumerate(race.get("Results") or []):
+            results = race.get("Results") or []
+            splits = f1_splits(results)
+            for n, r in enumerate(results):
                 tag = f"f1d{n}_{x:.0f}"
 
-                def drv(x, r=r, tag=tag):
+                def drv(x, r=r, tag=tag, split=splits[n]):
                     pos = int(r.get("position") or 0)
                     i = c.create_text(x, cy, text=str(pos), anchor="w", font=self.f_score,
                                       fill=PODIUM.get(pos, FG_DIM), tags=("content", tag))
                     x = c.bbox(i)[2] + 7 * u
-                    col = F1_TEAM_COLORS.get((r.get("Constructor") or {}).get("constructorId"),
-                                             FG_DIM)
-                    c.create_rectangle(x, cy - 8 * u, x + 4 * u, cy + 8 * u, fill=col, outline="",
-                                       tags=("content", tag))
+                    c.create_rectangle(x, cy - 8 * u, x + 4 * u, cy + 8 * u,
+                                       fill=f1_team_color(r), outline="", tags=("content", tag))
                     x += 9 * u
                     i = c.create_text(x, cy, text=f1_driver(r), anchor="w", font=self.f_abbr,
                                       fill=FG, tags=("content", tag))
                     x = c.bbox(i)[2] + 7 * u
-                    res = f1_result_text(r)
+                    res = split
                     i = c.create_text(x, cy, text=res, anchor="w", font=self.f_dim,
                                       fill=LIVE if res in ("DNF", "DSQ", "DNS") else FG_DIM,
                                       tags=("content", tag))
@@ -3413,9 +3528,9 @@ class F1Window:
     the weekend schedule, and a race-highlights button."""
 
     RESULT_COLS = [("pos", "Pos", 44), ("num", "No.", 44), ("name", "Driver", 190),
-                   ("team", "Team", 150), ("laps", "Laps", 50), ("time", "Time / Status", 130),
-                   ("grid", "Grid", 46), ("gain", "+/–", 46), ("pts", "Pts", 46),
-                   ("fl", "Fastest lap", 110)]
+                   ("team", "Team", 150), ("laps", "Laps", 50), ("time", "Time / Gap", 120),
+                   ("int", "Interval", 90), ("grid", "Grid", 46), ("gain", "+/–", 46),
+                   ("pts", "Pts", 46), ("fl", "Fastest lap", 110)]
 
     def __init__(self, ticker, race, key):
         self.ticker, self.race, self.key = ticker, race, key
@@ -3558,7 +3673,8 @@ class F1Window:
 
     def _fill_results(self, tree, results, sprint=False):
         rows = []
-        for r in results:
+        splits = f1_splits(results)
+        for n, r in enumerate(results):
             d = r.get("Driver") or {}
             try:
                 gain = int(r.get("grid") or 0) - int(r.get("position") or 0)
@@ -3572,8 +3688,10 @@ class F1Window:
             rows.append((r.get("position", ""), r.get("number", ""), f1_full_name(d),
                          (r.get("Constructor") or {}).get("name", ""), r.get("laps", ""),
                          f1_result_text(r) if f1_result_text(r) not in ("DNF",)
-                         else f"DNF · {r.get('status', '')}", r.get("grid", ""), gain,
-                         r.get("points", ""), fl_txt))
+                         else f"DNF · {r.get('status', '')}",
+                         "" if n == 0 else (splits[n] if splits[n].startswith("+") and
+                                            "lap" not in splits[n].lower() else ""),
+                         r.get("grid", ""), gain, r.get("points", ""), fl_txt))
         self._insert(tree, rows)
 
     def _fill_schedule(self):

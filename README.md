@@ -1,6 +1,6 @@
 # Sports Score Ticker for Windows
 
-**NHL · NFL · MLB · NBA · Bundesliga · F1** · Version 2.7.0 (see `CHANGELOG.md` for what changed in each version)
+**NHL · NFL · MLB · NBA · Bundesliga · F1** · Version 2.8.0 (see `CHANGELOG.md` for what changed in each version)
 
 An always-on-top bar that scrolls every game for the day in the league you
 pick. It moves continuously from left to right and wraps around in a seamless
@@ -25,8 +25,9 @@ Run **`SportsTicker_Setup.exe`** and follow the wizard. On the
 Setup installs just for you, so it doesn't need administrator rights. If Python
 isn't on your PC, it offers to install it for you. The last page can start the
 ticker right away. To update later, run the newer `SportsTicker_Setup.exe`; it
-replaces the old version and keeps your settings. To uninstall, use
-**Settings > Apps** or **Start menu > Sports Ticker > Uninstall Sports Ticker**.
+replaces the old version and keeps your settings. To uninstall, right-click the
+ticker and choose **Uninstall Sports Ticker…**, or use **Settings > Apps** or
+**Start menu > Sports Ticker > Uninstall Sports Ticker**.
 
 Windows may show a blue **"Windows protected your PC"** box the first time,
 because the installer isn't code-signed. Click **More info**, then **Run anyway**.
@@ -51,7 +52,7 @@ creates `dist\SportsTicker.exe`, which runs on any Windows PC without Python.
 `SportsTicker.exe`) in that folder.
 
 **Building the installer yourself:** install NSIS 3, then run
-`makensis -DVERSION=2.7.0 installer\SportsTicker.nsi`. The script is in the
+`makensis -DVERSION=2.8.0 installer\SportsTicker.nsi`. The script is in the
 `installer` folder.
 
 **Coming from the NHL-only ticker?** Close it with its X first, then delete its
@@ -68,6 +69,7 @@ folder (and its startup shortcut, if you made one). This version includes the NH
 | Right-click | Settings: league, refresh, previous/next day, scroll on/off, speed, direction, position, always-on-top, exit |
 | Drag the league logo | Moves the bar between the top and bottom of the screen |
 | Right-click → F1 live timing sign-in… | Connects F1 races to F1's official live timing for exact gaps (optional) |
+| Right-click → Uninstall Sports Ticker… | Removes the app, its shortcuts and (if you choose) its settings |
 | Right-click → What's new… | Shows the changelog; the version number is at the bottom of the menu |
 | ↻ at the right end | Refresh now |
 | **X** at the far right | Close the ticker |
@@ -88,16 +90,17 @@ games are, for example "Next games: Tue Nov 3".
 F1 works a little differently, because it's races rather than games:
 
 - **The ticker** shows the latest race: its name and date, then every finisher
-  in order: position (gold, silver and bronze for the podium), team color,
-  driver code, and gap to the winner (or DNF). A purple dot marks the fastest
+  in order: position (gold, silver and bronze for the podium), a bar in the
+  driver's team color, the driver code, and the **time gap to the car in front**
+  (the winner shows their race time; lapped or retired cars show +1 Lap, DNF...). A purple dot marks the fastest
   lap. At the end, a **NEXT** chip shows the upcoming race and its start time
   in your time zone.
 - **Click any F1 chip** for the race window:
   - The header shows the winner and fastest lap, with a **Race highlights**
     button that finds the race highlights on the official Formula 1 YouTube
     channel.
-  - Tabs: race results (grid, positions gained, laps, time or status, points,
-    fastest laps), sprint (on sprint weekends), qualifying (Q1/Q2/Q3), driver
+  - Tabs: race results (grid, positions gained, laps, gap to the winner,
+    interval to the car in front, points, fastest laps), sprint (on sprint weekends), qualifying (Q1/Q2/Q3), driver
     standings, constructor standings, and the weekend schedule.
 - **Click the NEXT chip** to see the upcoming weekend's schedule (practice,
   sprint, qualifying, race) in your local time, plus the current standings.

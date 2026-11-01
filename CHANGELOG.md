@@ -4,6 +4,25 @@ All notable changes to the Sports Ticker. Newest first.
 Version numbers: **major.minor.patch**. A major bump means a big change in
 what the app is, minor means new features, and patch means fixes and small tweaks.
 
+## 2.8.0 — 2026-11-01
+### Added
+- **Uninstall Sports Ticker…** in the right-click menu.
+  - If you installed with the installer, it closes the ticker and opens the
+    uninstaller.
+  - If you run it from a folder, it removes the ticker's settings, logos and
+    shortcuts, and its own files in that folder, leaving anything else there
+    untouched.
+### Changed
+- **F1 ticker:** after a race, each driver now shows the **time gap to the car
+  directly in front** (e.g. +0.475) instead of the gap to the winner. The
+  winner shows their race time; lapped and retired cars show +1 Lap, DNF and so on.
+- **F1 race results:** a new **Interval** column next to Time / Gap.
+### Fixed
+- **F1 team colors:** the bar in front of each driver's code now always uses
+  that driver's team color. Teams are matched whichever way a data source
+  spells them (e.g. "Visa Cash App Racing Bulls", "Kick Sauber", "Red Bull
+  Racing Honda RBPT", Audi, Cadillac). Before, unrecognized teams showed a grey bar.
+
 ## 2.7.0 — 2026-11-01
 ### Added
 - **Windows installer** (`SportsTicker_Setup.exe`): a setup wizard that lets
